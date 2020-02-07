@@ -9,16 +9,20 @@
 #include <net/if.h>
 #include <setjmp.h>
 #include <signal.h>
-
-#include "md5.h"
+#include <cstdlib>
+#include <ctime>
+#include <sys/time.h>
 
 #include "openssl/pem.h"
 #include "openssl/err.h"
 #include "openssl/sha.h"
 #include "openssl/crypto.h"
+#include "myaes.h"
+#include "md5.h"
 
 #define OUT
 #define MAXLINE		4096
+#define OVERTIME	60*60*24*7
 
 #define _tocken_register			0x0100 //鉴权注册
 #define _tocken_register_new		0x10100//鉴权注册-新
@@ -30,6 +34,7 @@ struct  authenticateInfo
 {
 	std::string 	ip;				// ip地址
 	std::string 	path;			// 鉴权文件地址
+	std::string 	pathCheckCode;	// 校验文件地址
 	//std::string     company;        // 公司
 	//std::string 	deviceType;		// 设备类型
 	std::string     key;        	// 公司
@@ -41,6 +46,7 @@ struct  authenticateInfo
 #define FILEPATH2		"/mnt/sd1/"
 #define FILEPATH3		"/mnt/sd2/"
 #define FILENAME		"desheng.com"
+#define FILENAME2		"desheng2.com"
 #define SPECIAL_FILE	"/mnt/sd1/special_for_dsai_test.com"
 
 const char* DSIP[3] = {"auth.desheng-ai.com", "www.desheng-ai.com.cn", "14.23.91.138"};
@@ -99,9 +105,12 @@ public:
 	int 	authenticate(std::string key, std::string algVersion);
 	int		getToken();
 	void 	init(struct authenticateInfo &info);
+	void	setCheckCode(long long checkCode);
+	int		checkCheckCode();
 	static	int	checkPath(const char * p);
 
 	static bool	isRunning;
+	static long long checkCode;
 
 private:
  	int		CreateTcpSocket();
@@ -191,6 +200,7 @@ int socket_resolver(const char *domain, char* ipaddr, int len)
 
 tocken* tocken::m_pTocken = NULL;
 bool	tocken::isRunning = false;
+long long tocken::checkCode = -1;
 static pthread_mutex_t m_lock = PTHREAD_MUTEX_INITIALIZER;
 
 int authentication(std::string key, std::string algVersion)
@@ -227,16 +237,25 @@ int authentication(std::string key, std::string algVersion)
 	{
 		info.path = FILEPATH1;
 		info.path += FILENAME;
+
+		info.pathCheckCode = FILEPATH1;
+		info.pathCheckCode+= FILENAME2;
 	}
 	else if(tocken::checkPath(FILEPATH2) == 0)
 	{
 		info.path = FILEPATH2;
 		info.path += FILENAME;
+
+		info.pathCheckCode = FILEPATH1;
+		info.pathCheckCode+= FILENAME2;
 	}
 	else if(tocken::checkPath(FILEPATH3) == 0)
 	{
 		info.path = FILEPATH3;
 		info.path += FILENAME;
+
+		info.pathCheckCode = FILEPATH1;
+		info.pathCheckCode+= FILENAME2;
 	}
 	else
 	{
@@ -248,6 +267,9 @@ int authentication(std::string key, std::string algVersion)
 	int r = pTock->getToken();
 	if( r != 0)
 		return r;							//返回license获取失败原因
+
+	if(tocken::checkCode < 0)				//checkCode小于零，程序启动，更改校验位。
+		pTock->setCheckCode(tocken::checkCode);
 
 	//if(!tocken::isRunning)
 		//pTock->start();					//启动线程
@@ -400,6 +422,14 @@ struct tocken::tocken_heartbeat
 int tocken::authenticate(std::string key, std::string algVersion)
 {
 	pthread_mutex_lock(&m_lock);
+
+	int result = checkCheckCode();
+	if(result != 0)
+	{
+		pthread_mutex_unlock(&m_lock);
+		return result;
+	}
+
 	m_info.algVersion = algVersion;
 	int n = 0;
 	while(n < 1)
@@ -604,6 +634,11 @@ int tocken::getToken()
 						printf("Register success!\n");
 						saveTocken(tocken);
 						isRegister = false;
+
+						//获取注册码成功后，根据系统时间和校验位，创建校验文件
+						srand((int)time(0));
+						checkCode = rand()%1000;
+						setCheckCode(checkCode);
 						break;
 					}
 					else
@@ -634,6 +669,146 @@ void tocken::init(authenticateInfo &info)
 	m_info = info;
 	m_nSockFd = 0;
 	m_sn = 0;
+}
+
+void tocken::setCheckCode(long long checkCode)
+{
+    struct timeval tv;
+	gettimeofday(&tv, NULL);
+	long long sec = tv.tv_sec;
+	char raw[64] = {0};
+	sprintf(raw, "%lld", sec);
+
+	if(checkCode >= 0) //checkCode大于0，已经设置了随机数，是注册成功后或者服务器回应，重新设置日期和校验位。
+	{
+		char strCheckCode[16] = {0};
+		sprintf(strCheckCode, "%lld", checkCode);
+		strcat(raw, strCheckCode);
+
+		FILE *fp = NULL;
+		fp = fopen(m_info.pathCheckCode.c_str(), "w+");
+		int padding_size = 0;
+		char *after_padding_buf = NULL;
+		char encrypt_buf[128] = {0};
+		if(fp != NULL)
+		{
+			after_padding_buf = padding_buf(raw, (int)strlen(raw), &padding_size);
+			encrpyt_buf(after_padding_buf, encrypt_buf, padding_size);
+
+	    	fprintf_buff(encrypt_buf, padding_size, fp);
+	    	free(after_padding_buf);
+	    	fclose(fp);
+		}
+	}
+	else //checkCode小于0，程序再次启动，只重新设置校验位
+	{
+		srand((int)time(0));
+		tocken::checkCode = rand()%1000;
+
+		char strCheckCode[16] = {0};
+		sprintf(strCheckCode, "%lld", tocken::checkCode);
+		strcat(raw, strCheckCode);
+
+		//读取校验文件解密，获取日期后和新的校验值合并，获得新的校验值。
+		FILE *fp = NULL;
+		char buff2[128] = {0};
+		char new_buf[128] = {0};
+		fp = fopen(m_info.pathCheckCode.c_str(), "r");
+		if(fp != NULL)
+		{
+			fgets(buff2, 128, (FILE*)fp);
+			if(strlen(buff2) < 10)
+			{
+				fclose(fp);
+				return;
+			}
+		    unsigned char temp[128] = {0};
+		    unsigned int tempLen = 0;
+		    int len = hex2str(buff2, temp, &tempLen);
+
+			char decrypt_buf[128] = {0};
+			decrpyt_buf((char *)temp, decrypt_buf, len);
+
+			strncpy(new_buf, decrypt_buf, 10);
+			strcat(new_buf, strCheckCode);
+
+			fclose(fp);
+			fp = NULL;
+		}
+
+		//重新写入新的校验值
+		fp = fopen(m_info.pathCheckCode.c_str(), "w+");
+		int padding_size = 0;
+		char *after_padding_buf = NULL;
+		char encrypt_buf[128] = {0};
+		if(fp != NULL)
+		{
+			after_padding_buf = padding_buf(raw, (int)strlen(raw), &padding_size);
+			encrpyt_buf(after_padding_buf, encrypt_buf, padding_size);
+
+	    	fprintf_buff(encrypt_buf, padding_size, fp);
+	    	free(after_padding_buf);
+	    	fclose(fp);
+		}
+	}
+}
+
+int tocken::checkCheckCode()
+{
+	int result = 0;
+	FILE *fp = NULL;
+	char buff2[128] = {0};
+	char new_buf[128] = {0};
+	char strCode[16] = {0};
+	fp = fopen(m_info.pathCheckCode.c_str(), "r");
+	if(fp != NULL)
+	{
+		fgets(buff2, 128, (FILE*)fp);
+		if(strlen(buff2) < 10)
+		{
+			fclose(fp);
+			return RET_FAILE_CHECKCODE_FAUILE;
+		}
+	    unsigned char temp[128] = {0};
+	    unsigned int tempLen = 0;
+	    int len = hex2str(buff2, temp, &tempLen);
+
+		char decrypt_buf[128] = {0};
+		decrpyt_buf((char *)temp, decrypt_buf, len);
+
+		strncpy(new_buf, decrypt_buf, 10);
+		strncpy(strCode, decrypt_buf + 10, strlen(decrypt_buf) - 10);
+
+		long long times;
+		long long code;
+		sscanf(new_buf, "%lld", &times);
+		sscanf(strCode, "%lld", &code);
+
+	    struct timeval tv;
+		gettimeofday(&tv,NULL);
+		long long sec = tv.tv_sec;
+
+		if(sec - times < 0 || sec - times > OVERTIME)
+		{
+			result = RET_FAILE_CHECKCODE_OVERTIME;
+			remove(m_info.path.c_str());
+		}
+
+		if(tocken::checkCode - code < -6 || tocken::checkCode - code > 6)
+		{
+			result = RET_FAILE_CHECKCODE_BIT_FAUILE;
+			remove(m_info.path.c_str());
+		}
+
+		fclose(fp);
+		fp = NULL;
+	}
+	else
+	{
+		return RET_FAILE_CHECKCODE_WITHOUT;
+	}
+
+	return result;
 }
 
 int tocken::CreateTcpSocket()

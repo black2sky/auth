@@ -16,6 +16,10 @@
 #define RET_FAILE_NET				10	// 网络错误
 #define RET_FAILE_OPEN_ERROR		11	// license文件打开失败
 
+#define RET_FAILE_CHECKCODE_OVERTIME	100 // 离线超过时间7天，鉴权无效
+#define RET_FAILE_CHECKCODE_BIT_FAUILE	101 // 校验位错误。
+#define RET_FAILE_CHECKCODE_WITHOUT		102 // 校验码不存在。
+#define RET_FAILE_CHECKCODE_FAUILE		103 // 校验码错误。
 
 int authentication(std::string key, std::string algVersion); // key： 用户申请id+key   algVersion：算法版本         函数返回0，为成功
 
