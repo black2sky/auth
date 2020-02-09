@@ -29,6 +29,9 @@
 #define _tocken_register_resp		0x8100 //鉴权注册应答
 
 #define _tocken_heartbeat			0x0002 //终端心跳
+#define _tocken_srv_check			0x0003 //服务器连接验证
+#define _tocken_srv_check_resp		0x8003 //服务器连接验证应答
+
 
 struct  authenticateInfo
 {
@@ -57,15 +60,18 @@ class Thread
 {
 private:
     //当前线程的线程ID
-    pthread_t tid;
-    static void * thread_proxy_func(void * args);
+    pthread_t tidSend;
+    pthread_t tidRecv;
+    static void * thread_proxy_func_send(void * args);
+    static void * thread_proxy_func_recv(void * args);
 
 public:
 	Thread();
 	virtual ~Thread();
 
-	virtual void run() = 0;
-	bool 	start();
+	virtual void runSend() = 0;
+	virtual void runRecv() = 0;
+	void 	start();
 };
 
 class tocken : public Thread
@@ -85,6 +91,8 @@ protected:
 	struct 	tocken_register_new; 				//鉴权注册-新
 	struct 	tocken_register_resp; 				//鉴权注册应答
 	struct 	tocken_heartbeat; 					//终端心跳
+	struct	tocken_srv_check;					//服务器连接验证
+	struct	tocken_srv_check_resp;				//服务器连接验证应答
 
 private:
 	static tocken* m_pTocken;
@@ -105,7 +113,7 @@ public:
 	int 	authenticate(std::string key, std::string algVersion);
 	int		getToken();
 	void 	init(struct authenticateInfo &info);
-	void	setCheckCode(long long checkCode);
+	void	setCheckCode(int type);
 	int		checkCheckCode();
 	static	int	checkPath(const char * p);
 
@@ -119,7 +127,8 @@ private:
 	int		Send(const char* pBuf, int nLen);
 	int 	Recv(char* pBuf, int nLen);
 	void 	Close();
-	void 	run();
+	void 	runSend();
+	void 	runRecv();
 	void 	saveTocken(char* buf);
 
 	int 	netdev_get_mac(const char *devname, OUT char *macstr, int macstr_len);
@@ -269,10 +278,10 @@ int authentication(std::string key, std::string algVersion)
 		return r;							//返回license获取失败原因
 
 	if(tocken::checkCode < 0)				//checkCode小于零，程序启动，更改校验位。
-		pTock->setCheckCode(tocken::checkCode);
+		pTock->setCheckCode(1);
 
-	//if(!tocken::isRunning)
-		//pTock->start();					//启动线程
+	if(!tocken::isRunning)
+		pTock->start();						//启动线程
 
 	int result =  pTock->authenticate(KEY, algVersion);
 	return result;							//返回鉴权结果
@@ -286,15 +295,23 @@ Thread::~Thread()
 {
 }
 
-bool Thread::start()
+void Thread::start()
 {
-    return  pthread_create(&tid, NULL, thread_proxy_func, this) == 0 ? true : false;
+	pthread_create(&tidRecv, NULL, thread_proxy_func_recv, this) == 0 ? true : false;
+	pthread_create(&tidSend, NULL, thread_proxy_func_send, this) == 0 ? true : false;
 }
 
-void * Thread::thread_proxy_func(void * args)
+void * Thread::thread_proxy_func_send(void * args)
 {
  		Thread * pThread = static_cast<Thread *>(args);
-		pThread->run();
+		pThread->runSend();
+ 		return NULL;
+}
+
+void * Thread::thread_proxy_func_recv(void * args)
+{
+ 		Thread * pThread = static_cast<Thread *>(args);
+		pThread->runRecv();
  		return NULL;
 }
 
@@ -418,6 +435,31 @@ struct tocken::tocken_heartbeat
 	std::string IMEI;
 	std::string CIMI;
 };
+
+struct tocken::tocken_srv_check
+{
+	tocken_srv_check()
+	{
+	}
+	int _getdata(char *buf)
+	{
+		head.MSGID = _tocken_srv_check;
+		char n[16] = {0};
+		sprintf(n, "%d", head.MSGID);
+		std::string str = n;
+		char _sn[16] = {0};
+		sprintf(_sn, "%ld", head.SN);
+		std::string strSN = _sn;
+
+		str += ";;;" + head.IMEI + ";;;" + head.UUID + ";;;" + head.MAC + ";;;" + strSN + ";;;" + ";;;";
+		strcpy(buf, str.c_str());
+
+		return strlen(buf);
+	}
+
+	struct head head;
+};
+
 
 int tocken::authenticate(std::string key, std::string algVersion)
 {
@@ -638,7 +680,7 @@ int tocken::getToken()
 						//获取注册码成功后，根据系统时间和校验位，创建校验文件
 						srand((int)time(0));
 						checkCode = rand()%1000;
-						setCheckCode(checkCode);
+						setCheckCode(0);
 						break;
 					}
 					else
@@ -671,7 +713,7 @@ void tocken::init(authenticateInfo &info)
 	m_sn = 0;
 }
 
-void tocken::setCheckCode(long long checkCode)
+void tocken::setCheckCode(int type)
 {
     struct timeval tv;
 	gettimeofday(&tv, NULL);
@@ -679,7 +721,7 @@ void tocken::setCheckCode(long long checkCode)
 	char raw[64] = {0};
 	sprintf(raw, "%lld", sec);
 
-	if(checkCode >= 0) //checkCode大于0，已经设置了随机数，是注册成功后或者服务器回应，重新设置日期和校验位。
+	if(type == 0) //已经设置了随机数，是注册成功后或者服务器回应，重新设置日期和校验位。
 	{
 		char strCheckCode[16] = {0};
 		sprintf(strCheckCode, "%lld", checkCode);
@@ -700,16 +742,19 @@ void tocken::setCheckCode(long long checkCode)
 	    	fclose(fp);
 		}
 	}
-	else //checkCode小于0，程序再次启动，只重新设置校验位
+	else if(type == 1 || type == 2)//1：在已经有校验文件情况下，程序启动，随机初始化校验位，生成新的校验文件。2：进程运行，定时修改校验位并生成新的校验文件。
 	{
-		srand((int)time(0));
-		tocken::checkCode = rand()%1000;
+		if(type == 1)
+		{
+			srand((int)time(0));
+			tocken::checkCode = rand()%1000;
+		}
 
 		char strCheckCode[16] = {0};
 		sprintf(strCheckCode, "%lld", tocken::checkCode);
 		strcat(raw, strCheckCode);
 
-		//读取校验文件解密，获取日期后和新的校验值合并，获得新的校验值。
+		//读取校验文件并解密获得校验值，截取日期后和新的校验值合并，获得新的校验值。
 		FILE *fp = NULL;
 		char buff2[128] = {0};
 		char new_buf[128] = {0};
@@ -743,7 +788,7 @@ void tocken::setCheckCode(long long checkCode)
 		char encrypt_buf[128] = {0};
 		if(fp != NULL)
 		{
-			after_padding_buf = padding_buf(raw, (int)strlen(raw), &padding_size);
+			after_padding_buf = padding_buf(new_buf, (int)strlen(new_buf), &padding_size);
 			encrpyt_buf(after_padding_buf, encrypt_buf, padding_size);
 
 	    	fprintf_buff(encrypt_buf, padding_size, fp);
@@ -788,12 +833,14 @@ int tocken::checkCheckCode()
 		gettimeofday(&tv,NULL);
 		long long sec = tv.tv_sec;
 
+		//校验离线时间是否超过7天
 		if(sec - times < 0 || sec - times > OVERTIME)
 		{
 			result = RET_FAILE_CHECKCODE_OVERTIME;
 			remove(m_info.path.c_str());
 		}
 
+		//检查校验位是否正确
 		if(tocken::checkCode - code < -6 || tocken::checkCode - code > 6)
 		{
 			result = RET_FAILE_CHECKCODE_BIT_FAUILE;
@@ -878,7 +925,51 @@ bool tocken::ReConnect(int n)
 	return false;
 }
 
-void tocken::run()
+void tocken::runSend()
+{
+	tocken::isRunning = true;
+	int count = 0;
+	char buf[MAXLINE];
+	while(1)
+	{
+		memset(buf, 0, sizeof(buf));
+		struct head head;
+#ifdef CIMI
+		head.IMEI = m_IMEI + m_CIMI;
+#else
+		head.IMEI = m_IMEI;
+#endif
+		head.UUID = m_UUID;
+		head.MAC = m_MAC;
+		head.SN = getSN();
+
+		if(count == 300)
+		{
+			count = 0;
+			struct tocken_srv_check srv_check;
+			srv_check.head = head;
+			srv_check._getdata(buf);
+		}
+		else//心跳包
+		{
+			struct tocken_heartbeat heartbeat;
+			heartbeat.head = head;
+			heartbeat.IMEI = m_IMEI;
+			heartbeat.CIMI = m_CIMI;
+			heartbeat._getdata(buf);
+		}
+
+		std::string msg = buf;
+		encrypt(buf, msg);
+		Send(msg.c_str(), strlen(buf));
+		count++;
+		usleep(1000000);
+	}
+
+	tocken::isRunning = false;
+}
+
+void tocken::runRecv()
 {
 	tocken::isRunning = true;
 	char buf[MAXLINE];
@@ -895,37 +986,36 @@ void tocken::run()
 		}
 	}
 
-	// 心跳包
+	//重复连接服务器，直到连接成功为止
+	do
+	{
+		usleep(5000);
+		Close();
+		CreateTcpSocket();
+	}while(!Connect());
+
+	int cnt;
+	char pBuf[MAXLINE] = {0};
 	while(1)
 	{
-		memset(buf, 0, sizeof(buf));
-		struct tocken_heartbeat heartbeat;
-#ifdef CIMI
-		heartbeat.head.IMEI = m_IMEI + m_CIMI;
-#else
-		heartbeat.head.IMEI = m_IMEI;
-#endif
-		heartbeat.head.UUID = m_UUID;
-		heartbeat.head.MAC = m_MAC;
-		heartbeat.head.SN = getSN();
-		heartbeat.IMEI = m_IMEI;
-		heartbeat.CIMI = m_CIMI;
-		heartbeat._getdata(buf);
-
-		std::string heartbeatMsg = buf;
-		encrypt(buf, heartbeatMsg);
-
-		if(Send(heartbeatMsg.c_str(), strlen(buf)))
-		{
-
-		}
-		else
-		{
-			if(!ReConnect(100))
-				usleep(600000000);	// 重连服务器失败后，10分钟后再尝试重连！
-		}
-
-		usleep(1000000);
+		memset(pBuf, 0, sizeof(pBuf));
+	    cnt = (int)Recv(pBuf, MAXLINE);
+	    if( cnt >0 )
+	    {
+	    	setCheckCode(0);
+	    }
+	    else
+	   {
+	        if((cnt<0) &&(errno == EAGAIN||errno == EWOULDBLOCK||errno == EINTR))
+	        {
+	            continue;//继续接收数据
+	        }
+	        else
+	        {
+				if(!ReConnect(100))
+					usleep(600000000);	// 连接服务器失败后，10分钟后再尝试重连！
+	        }
+	    }
 	}
 
 	Close();
