@@ -20,6 +20,27 @@
 #include "myaes.h"
 #include "md5.h"
 
+#define LOG(format,...) printf("["__DATE__" "__TIME__"] " format "\n",  ##__VA_ARGS__)
+
+#define RET_SUCCESS					0	// 鉴权成功
+#define RET_FAIL					-1  // 鉴权失败,license不一致
+#define	RET_FAIL_IMEI				2	// IMEI读取失败或者为空
+#define	RET_FAIL_COMPANY			3	// 企业不存在
+#define	RET_FAIL_VERSION			4	// key不支持该版本
+#define RET_FAIL_VERSION_OUT		5	// 授权数超出上限
+#define	RET_FAIL_KEY_NULL			6	// 授权key为空
+#define RET_FAILE_KEY_NOT_IN_SYS	7	// 授权key在系统中不存在
+#define	RET_FAILE_KEY_DISABLE		8	// key已被禁用
+#define	RET_FAILE_VERSION_FORMAT_ERR 9	// 算法版本格式不正确
+
+#define RET_FAILE_NET				10	// 网络错误
+#define RET_FAILE_OPEN_ERROR		11	// license文件打开失败
+
+#define RET_FAILE_CHECKCODE_OVERTIME	100 // 离线超过时间7天，鉴权无效
+#define RET_FAILE_CHECKCODE_BIT_FAUILE	101 // 校验位错误。
+#define RET_FAILE_CHECKCODE_WITHOUT		102 // 校验码不存在。
+#define RET_FAILE_CHECKCODE_FAUILE		103 // 校验码错误。
+
 #define OUT
 #define MAXLINE		4096
 #define OVERTIME	60*60*24*7
@@ -28,9 +49,9 @@
 #define _tocken_register_new		0x10100//鉴权注册-新
 #define _tocken_register_resp		0x8100 //鉴权注册应答
 
-#define _tocken_heartbeat			0x0002 //终端心跳
-#define _tocken_srv_check			0x0003 //服务器连接验证
-#define _tocken_srv_check_resp		0x8003 //服务器连接验证应答
+#define _tocken_heartbeat			0x0002 		//终端心跳
+#define _tocken_srv_check			0x010102 	//终端鉴权校验
+#define _tocken_srv_resp			0x8001 		//通用应答
 
 
 struct  authenticateInfo
@@ -45,12 +66,17 @@ struct  authenticateInfo
 };
 
 #define PORT			9191
-#define FILEPATH1		"/mnt/nand/"
-#define FILEPATH2		"/mnt/sd1/"
-#define FILEPATH3		"/mnt/sd2/"
-#define FILENAME		"desheng.com"
-#define FILENAME2		"desheng2.com"
-#define SPECIAL_FILE	"/mnt/sd1/special_for_dsai_test.com"
+
+#ifdef CITOPS	//思拓授权的路径
+	#define FILEPATH1		"/mnt/user/dsai"
+#else
+	#define FILEPATH1		"/mnt/nand/"
+	#define FILEPATH2		"/mnt/sd1/"
+	#define FILEPATH3		"/mnt/sd2/"
+#endif
+	#define FILENAME		"desheng.com"
+	#define FILENAME2		"desheng2.com"
+	#define SPECIAL_FILE	"/mnt/sd1/special_for_dsai_test.com"
 
 const char* DSIP[3] = {"auth.desheng-ai.com", "www.desheng-ai.com.cn", "14.23.91.138"};
 
@@ -79,6 +105,7 @@ class tocken : public Thread
 protected:
 	int 	m_nSockFd;
 	long 	m_sn;
+	int		m_disconnectSec;
 	struct  authenticateInfo 	m_info;
  	struct 	sockaddr_in 		m_serverAddr;
 	std::string m_IMEI;
@@ -102,9 +129,9 @@ public:
 	     if(m_pTocken == NULL)
 	     {
 	    	 m_pTocken = new tocken();
+	    	 m_pTocken->init(info);
 	     }
 
-	     m_pTocken->init(info);
 	     return m_pTocken;
 	}
 	tocken();
@@ -132,7 +159,7 @@ private:
 	void 	saveTocken(char* buf);
 
 	int 	netdev_get_mac(const char *devname, OUT char *macstr, int macstr_len);
-	int 	getSN();
+	long 	getSN();
 	void 	getCompany(OUT std::string &company);
 };
 
@@ -211,6 +238,7 @@ tocken* tocken::m_pTocken = NULL;
 bool	tocken::isRunning = false;
 long long tocken::checkCode = -1;
 static pthread_mutex_t m_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t m_lockSec = PTHREAD_MUTEX_INITIALIZER;
 
 int authentication(std::string key, std::string algVersion)
 {
@@ -242,6 +270,7 @@ int authentication(std::string key, std::string algVersion)
 	authenticateInfo info;
 	info.key = KEY;
 	info.algVersion = algVersion;
+
 	if(tocken::checkPath(FILEPATH1) == 0)
 	{
 		info.path = FILEPATH1;
@@ -250,6 +279,8 @@ int authentication(std::string key, std::string algVersion)
 		info.pathCheckCode = FILEPATH1;
 		info.pathCheckCode+= FILENAME2;
 	}
+#ifdef CITOPS
+#else
 	else if(tocken::checkPath(FILEPATH2) == 0)
 	{
 		info.path = FILEPATH2;
@@ -266,6 +297,7 @@ int authentication(std::string key, std::string algVersion)
 		info.pathCheckCode = FILEPATH1;
 		info.pathCheckCode+= FILENAME2;
 	}
+#endif
 	else
 	{
 		printf("Warning #00001!\n");		//Open file %s failed
@@ -428,6 +460,7 @@ struct tocken::tocken_heartbeat
 		std::string strSN = _sn;
 
 		str += ";;;" + head.IMEI + ";;;" + head.UUID + ";;;" + head.MAC + ";;;" + strSN + ";;;" + IMEI + "," + CIMI + ";;;";
+		strcpy(buf, str.c_str());
 
 		return strlen(buf);
 	}
@@ -451,15 +484,20 @@ struct tocken::tocken_srv_check
 		sprintf(_sn, "%ld", head.SN);
 		std::string strSN = _sn;
 
-		str += ";;;" + head.IMEI + ";;;" + head.UUID + ";;;" + head.MAC + ";;;" + strSN + ";;;" + ";;;";
+		str += ";;;" + head.IMEI + ";;;" + head.UUID + ";;;" + head.MAC + ";;;" + strSN + ";;;" + ";;;" + token + ";;;";
 		strcpy(buf, str.c_str());
 
 		return strlen(buf);
 	}
 
 	struct head head;
+	std::string token;
 };
 
+struct tocken::tocken_srv_check_resp
+{
+
+};
 
 int tocken::authenticate(std::string key, std::string algVersion)
 {
@@ -679,7 +717,7 @@ int tocken::getToken()
 
 						//获取注册码成功后，根据系统时间和校验位，创建校验文件
 						srand((int)time(0));
-						checkCode = rand()%1000;
+						tocken::checkCode = rand()%1000;
 						setCheckCode(0);
 						break;
 					}
@@ -696,7 +734,7 @@ int tocken::getToken()
 		{
 			ReConnect(0);
 		}
-		usleep(5000);
+		usleep(500000);
 	}
 
 	Close();
@@ -711,6 +749,7 @@ void tocken::init(authenticateInfo &info)
 	m_info = info;
 	m_nSockFd = 0;
 	m_sn = 0;
+	m_disconnectSec = 0;
 }
 
 void tocken::setCheckCode(int type)
@@ -724,7 +763,7 @@ void tocken::setCheckCode(int type)
 	if(type == 0) //已经设置了随机数，是注册成功后或者服务器回应，重新设置日期和校验位。
 	{
 		char strCheckCode[16] = {0};
-		sprintf(strCheckCode, "%lld", checkCode);
+		sprintf(strCheckCode, "%lld", tocken::checkCode);
 		strcat(raw, strCheckCode);
 
 		FILE *fp = NULL;
@@ -779,6 +818,10 @@ void tocken::setCheckCode(int type)
 
 			fclose(fp);
 			fp = NULL;
+		}
+		else
+		{
+			return;
 		}
 
 		//重新写入新的校验值
@@ -852,6 +895,7 @@ int tocken::checkCheckCode()
 	}
 	else
 	{
+		remove(m_info.path.c_str());
 		return RET_FAILE_CHECKCODE_WITHOUT;
 	}
 
@@ -863,6 +907,11 @@ int tocken::CreateTcpSocket()
 	m_nSockFd = socket(AF_INET, SOCK_STREAM, 0);
 	if(m_nSockFd == -1)
 		return -1;
+
+	struct timeval tv_timeout;
+	tv_timeout.tv_sec = 10;
+	tv_timeout.tv_usec = 0;
+	setsockopt(m_nSockFd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv_timeout, sizeof(struct timeval));
 
 	m_serverAddr.sin_family = AF_INET;
 	m_serverAddr.sin_port = htons(PORT);
@@ -918,10 +967,12 @@ bool tocken::ReConnect(int n)
 			return true;
 
 		i++;
-		printf("Connecting Service!!!\n");
-		usleep(5000);
+		if(n == 0)
+			printf("Connecting Service!!!\n");
+		usleep(1000000);
 	}
 
+	Close();
 	return false;
 }
 
@@ -941,28 +992,58 @@ void tocken::runSend()
 #endif
 		head.UUID = m_UUID;
 		head.MAC = m_MAC;
-		head.SN = getSN();
 
-		if(count == 300)
+		if((count % 300) == 0)		//每五分钟，向服务端发送终端鉴权校验请求
 		{
-			count = 0;
+			FILE *fp = NULL;
+			char token[256] = {0};
+			fp = fopen(m_info.path.c_str(), "r");
+			if(fp != NULL)
+			{
+				fgets(token, 255, (FILE*)fp);
+				fclose(fp);
+			}
+
+			head.SN = getSN();
 			struct tocken_srv_check srv_check;
 			srv_check.head = head;
+			srv_check.token = token;
 			srv_check._getdata(buf);
 		}
-		else//心跳包
+
+		if((count % 30) == 0)	//每30秒,验证位改变
 		{
+			tocken::checkCode++;
+			setCheckCode(2);
+		}
+
+		if(count >= 900)	//每15分钟,心跳包
+		{
+			head.SN = getSN();
+
 			struct tocken_heartbeat heartbeat;
 			heartbeat.head = head;
 			heartbeat.IMEI = m_IMEI;
 			heartbeat.CIMI = m_CIMI;
 			heartbeat._getdata(buf);
+			count = 0;
 		}
 
 		std::string msg = buf;
 		encrypt(buf, msg);
-		Send(msg.c_str(), strlen(buf));
+		if(strlen(buf) > 0)
+		{
+			Send(msg.c_str(), strlen(buf));
+#ifdef DEBUG
+			LOG("Send: %s\n", buf);
+#endif
+		}
+
 		count++;
+		pthread_mutex_lock(&m_lockSec);
+		m_disconnectSec++;
+		pthread_mutex_unlock(&m_lockSec);
+
 		usleep(1000000);
 	}
 
@@ -989,7 +1070,7 @@ void tocken::runRecv()
 	//重复连接服务器，直到连接成功为止
 	do
 	{
-		usleep(5000);
+		usleep(500000);
 		Close();
 		CreateTcpSocket();
 	}while(!Connect());
@@ -1000,12 +1081,54 @@ void tocken::runRecv()
 	{
 		memset(pBuf, 0, sizeof(pBuf));
 	    cnt = (int)Recv(pBuf, MAXLINE);
-	    if( cnt >0 )
+
+		std::string recvMsg = pBuf;
+		decrypt(pBuf, recvMsg);
+
+	    if(cnt >0)
 	    {
-	    	setCheckCode(0);
+			pthread_mutex_lock(&m_lockSec);
+			m_disconnectSec = 0;
+			pthread_mutex_unlock(&m_lockSec);
+
+			char rest[256] = {0};
+			struct head head;
+			head._getdata(recvMsg.c_str(), rest);
+
+#ifdef DEBUG
+			LOG("Recv MSGID: %#X, %s\n", head.MSGID, rest);
+#endif
+
+			if(head.MSGID == _tocken_srv_resp)	//通用应答
+			{
+				char respSN[16] = {0};
+				char respMSGID[16] = {0};
+				char respResult[8] = {0};
+				sscanf(rest, "%[^;]%*c%*c%*c%[^;]%*c%*c%*c[^;]%*c%*c%*c", respSN, respMSGID, respResult);
+
+				long SN = 0;
+				int msgID = 0;
+				int result;
+				SN = atol(respSN);
+				msgID = atoi(respMSGID);
+				result = atoi(respResult);
+				switch(msgID)
+				{
+				case _tocken_srv_check:		//服务器连接验证
+					if(result == 0)
+						setCheckCode(0);
+					break;
+				}
+			}
 	    }
 	    else
 	   {
+	    	if(m_disconnectSec > 30 * 60)
+	    	{
+				if(!ReConnect(100))
+					usleep(600000000);	// 连接服务器失败后，10分钟后再尝试重连！
+	    	}
+
 	        if((cnt<0) &&(errno == EAGAIN||errno == EWOULDBLOCK||errno == EINTR))
 	        {
 	            continue;//继续接收数据
@@ -1016,6 +1139,8 @@ void tocken::runRecv()
 					usleep(600000000);	// 连接服务器失败后，10分钟后再尝试重连！
 	        }
 	    }
+
+	    usleep(1000000);
 	}
 
 	Close();
@@ -1071,7 +1196,7 @@ int tocken::netdev_get_mac(const char *devname, OUT char *macstr, int macstr_len
 	return rc;
 }
 
-int tocken::getSN()
+long tocken::getSN()
 {
 	return m_sn++;
 }

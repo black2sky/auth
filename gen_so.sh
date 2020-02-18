@@ -2,12 +2,9 @@
 #deinclude CIMI
 #arm-hisiv500-linux-g++ -shared -o libtocken.so -fPIC *.cpp
 #include CIMI
-#arm-hisiv500-linux-g++ -shared -o libtocken.so -D=CIMI -fPIC *.cpp
 
-#arm-hisiv500-linux-strip libtocken.so
-rm test libtocken.so
-export LD_LIBRARY_PATH=/home/black2sky/src/auth/sdk:$LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:.
-g++ -shared -o libtocken.so -fPIC *.cpp -I /home/black2sky/src/auth/sdk/include/ -L /home/black2sky/src/auth/sdk/ -lcrypto -lssl
+rm libtocken.so test 
+arm-hisiv500-linux-g++ -shared -o libtocken.so -fPIC -DDEBUG  md5.cpp myaes.cpp get_imei.cpp tocken.cpp -I/home/blacksky/src/auth/sdk/hisiv500/include -L/home/blacksky/src/auth/sdk/hisiv500/lib -lcrypto -lssl
 
-g++ test.cpp -o test -I/home/black2sky/src/auth/sdk/ -L/home/black2sky/src/auth/sdk/ -ltocken -lpthread
+arm-hisiv500-linux-g++ test.cpp -L. -ltocken -lpthread -o test 
+

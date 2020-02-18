@@ -1,19 +1,28 @@
 #include <iostream>
 #include <unistd.h>
 #include "tocken.h"
-#include "myaes.h"
-
+#include <stdio.h>
 #include <cstdlib>
 #include <ctime>
 #include <sys/time.h>
 
-#define MYFILE "/home/black2sky/src/auth/sdk/desheng2.com"
 int main()
 {
+	int count = 0;
+	int result;
+	//result = authentication("ff8081816e4a41d7016e4a4efdd40004", "DSAI-2508-ADF_");//zhengshi
+	//result = authentication("ff8081816e4983a3016e49a9d7520000", "DSAI-2508-DSM-ADAS");//ce shi
+	result = authentication("ff8081816e4a41d7016e4a4efdd40004", "DSAI-2508-ADF_");
+	printf("%d. auth result: %d\n", count, result);
 
-	authentication("123456789", "test");
 	while(1)
-		usleep(1000000);
+	{
+		count++;
+		usleep(10000000);
+		result = authentication("ff8081816e4a41d7016e4a4efdd40004", "DSAI-2508-ADF_");
+		printf("%d. auth result: %d\n", count, result);
+	}
+
 
 //	srand((int)time(0))	;
 //	long long checkCode = rand()%1000;
