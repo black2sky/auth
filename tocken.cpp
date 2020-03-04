@@ -69,6 +69,7 @@ struct  authenticateInfo
 
 #ifdef CITOPS	//思拓授权的路径
 	#define FILEPATH1		"/mnt/user/dsai"
+	//#define FILEPATH1		"/var/disk2/dsai"
 #else
 	#define FILEPATH1		"/mnt/nand/"
 	#define FILEPATH2		"/mnt/sd1/"
@@ -78,7 +79,7 @@ struct  authenticateInfo
 	#define FILENAME2		"desheng2.com"
 	#define SPECIAL_FILE	"/mnt/sd1/special_for_dsai_test.com"
 
-const char* DSIP[3] = {"auth.desheng-ai.com", "www.desheng-ai.com.cn", "14.23.91.138"};
+const char* DSIP[3] = {"auth.desheng-ai.com", "www.desheng-ai.com.cn", "183.3.136.80"};
 
 int socket_resolver(const char *domain, char* ipaddr, int len);
 
@@ -240,14 +241,15 @@ long long tocken::checkCode = -1;
 static pthread_mutex_t m_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t m_lockSec = PTHREAD_MUTEX_INITIALIZER;
 
-int authentication(std::string key, std::string algVersion)
+int authentication(std::string key, std::string algVersion, std::string imeiDevPath)
 {
-	std::cout << "Key: " << key << std::endl;
 	int pos = key.find("_");	// id_key, 分割id和key
 	key = key.substr(pos + 1);
 	std::string KEY = key;
-
+	if(imeiDevPath.length() != 0)
+		setImeiDevPath(imeiDevPath.c_str());
 #ifdef DEBUG
+	std::cout << "Key: " << key << std::endl;
 	//检查是否存在测试KEY，存在则使用测试KEY测试
 	pthread_mutex_lock(&m_lock);
     FILE *fp = NULL;
@@ -594,12 +596,14 @@ int tocken::getToken()
 	char recvBuf[MAXLINE];
 
 	//get IMEI
-	if (get_imei(0) == NULL) {
+	char tempIMEI[256] = {0};
+	strcpy(tempIMEI, get_imei(0));
+	if (strlen(tempIMEI) == 0) {
 		printf("ERROR #00000");
 		return RET_FAIL_IMEI;
 	}
 
-	m_IMEI = get_imei(0);
+	m_IMEI = tempIMEI;
 	//m_IMEI = "cfaaqqa";
 
 	// get CIMI
@@ -610,10 +614,7 @@ int tocken::getToken()
 	}
 	m_CIMI = get_imei(1);
 #else
-	if (get_imei(1) == NULL)
 		m_CIMI = "";
-	else
-		m_CIMI = get_imei(1);
 #endif
 
 	//m_ICCID
@@ -1206,6 +1207,10 @@ int tocken::checkPath(const char * p)
 	//检测文件夹是否可以写
 	pthread_mutex_lock(&m_lock);
 	int result = -1;
+	if(access(p, F_OK) != 0)
+	{
+		CreateDirectoryEx(p);
+	}
     result = access(p, W_OK);
 	pthread_mutex_unlock(&m_lock);
 

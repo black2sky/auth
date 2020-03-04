@@ -12,14 +12,14 @@ int main()
 	int result;
 	//result = authentication("ff8081816e4a41d7016e4a4efdd40004", "DSAI-2508-ADF_");//zhengshi
 	//result = authentication("ff8081816e4983a3016e49a9d7520000", "DSAI-2508-DSM-ADAS");//ce shi
-	result = authentication("ff8081816e4a41d7016e4a4efdd40004", "DSAI-2508-ADF_");
+	result = authentication("ff8081817056dd510170575734c30000", "DSM_V1.0", "/dev/ttyUSB2");
 	printf("%d. auth result: %d\n", count, result);
 
 	while(1)
 	{
 		count++;
 		usleep(10000000);
-		result = authentication("ff8081816e4a41d7016e4a4efdd40004", "DSAI-2508-ADF_");
+		result = authentication("ff8081817056dd510170575734c30000", "DSM_V1.0");
 		printf("%d. auth result: %d\n", count, result);
 	}
 

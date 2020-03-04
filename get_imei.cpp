@@ -25,16 +25,38 @@ const char *readImeiString(int type);
 bool writeEncryptedString(const char* str);
 const char *readEncryptedString();
 
+static char gImei[256] = {0};
+static char gImeiDevPath[256] = {0};
+
+void setImeiDevPath(const char* ImeiDevPath)
+{
+	memset(gImeiDevPath, 0, sizeof(gImeiDevPath));
+	strcpy(gImeiDevPath, ImeiDevPath);
+}
 
 //int main(int argc, char **argv)
 const char* get_imei(int type)
 {
-	int rc, i;
+	if(strlen(gImei) > 10)
+	{
+		return gImei;
+	}
 
-	const char *imei = readImeiString(type);
+	int rc, i;
+	int n = 0;
+	while(n < 10)
+	{
+		memset(gImei, 0, sizeof(gImei));
+		strcpy(gImei, readImeiString(type));
+		if(strlen(gImei) > 0)
+			break;
+
+		n++;
+		usleep(500000);
+	}
 	//printf("read imei=%s\n", imei);
 
-	return imei;
+	return gImei;
 }
 
 
@@ -134,7 +156,11 @@ const char *readImeiString(int type)
 	static const char *queryStr[2] = { "AT+CGSN\r\n", "AT+CIMI\r\n" };
 	static const char *subStr[2] = { "+CGSN", "CIMI" };
 
-	int fd = open("/dev/ttyUSB2", O_RDWR);
+	int fd;
+	if(strlen(gImeiDevPath) > 0)
+		fd = open(gImeiDevPath, O_RDWR);
+	else
+		fd = open("/dev/ttyUSB2", O_RDWR);
 	if ( fd < 0 )
 	{
 		printf("imei, open dev error\n");
@@ -152,7 +178,8 @@ const char *readImeiString(int type)
 	memset(bufptr, 0, sizeof(bufptr));
 	int count = 0, i;
 
-	rc = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
+	int old = fcntl(fd, F_GETFL);
+	rc = fcntl(fd, F_SETFL, old | O_NONBLOCK);
 
 	for ( i=0; i<5; i++ )
 	{
@@ -163,14 +190,20 @@ const char *readImeiString(int type)
 		usleep(100*1000);
 	}
 	
+	fcntl(fd, F_SETFL, old);
 	close(fd);
+
 	if ( count <= 0 )
 	{
 		printf("imei, read dev error\n");
 		return NULL;
 	}
 
-	// parse imei
+// parse imei
+#ifdef CITOPS	//思拓
+	sscanf(bufptr, "%*[^0-9]%[0-9]", imei);
+#else
+
 	rc = read_sub_string_trim(bufptr, subStr[type], "OK", imei, sizeof(imei));
 	if ( rc < 10 )
 	{
@@ -180,8 +213,12 @@ const char *readImeiString(int type)
 		}
 		return NULL;
 	}
+#endif
 
-	//printf("read imei=%s\n", imei);
+#ifdef DEBUG
+	printf("+++: %s\n", bufptr);
+	printf("IMEI=%s\n", imei);
+#endif
 	return imei;
 	
 }

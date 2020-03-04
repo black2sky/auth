@@ -83,3 +83,30 @@ void decrpyt_buf(char *raw_buf, char *encrpy_buf, int len)
     AES_set_decrypt_key(myKey,128,&aes);
     AES_cbc_encrypt((unsigned char*)raw_buf, (unsigned char*)encrpy_buf,len, &aes, myIv, AES_DECRYPT);
 }
+
+int CreateDirectoryEx(const char *sPathName)
+{
+    char DirName[256];
+    strcpy(DirName,sPathName);
+    int i,len = strlen(DirName);
+    if(DirName[len-1]!='/')
+    strcat(DirName,"/");
+    len = strlen(DirName);
+    for(i=1;i<len;i++)
+    {
+        if(DirName[i]=='/')
+        {
+            DirName[i] = 0;
+            if(access(DirName,F_OK) != 0)
+            {
+                if(mkdir(DirName,0777) == -1)
+                {
+                    perror("mkdir error");
+                    return -1;
+                }
+            }
+            DirName[i] = '/';
+         }
+  }
+  return 0;
+}
