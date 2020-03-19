@@ -37,7 +37,7 @@ void setImeiDevPath(const char* ImeiDevPath)
 //int main(int argc, char **argv)
 const char* get_imei(int type)
 {
-	if(strlen(gImei) > 10)
+	if(strlen(gImei) >= 10)
 	{
 		return gImei;
 	}
@@ -48,18 +48,15 @@ const char* get_imei(int type)
 	{
 		memset(gImei, 0, sizeof(gImei));
 		strcpy(gImei, readImeiString(type));
-		if(strlen(gImei) > 0)
+		if(strlen(gImei) >= 10)
 			break;
 
 		n++;
 		usleep(500000);
 	}
-	//printf("read imei=%s\n", imei);
 
 	return gImei;
 }
-
-
 
 int ze_read_sub_string_imei(const char *str, const char *begin, const char *end, char *dst, int sizeof_dst)
 {
@@ -163,16 +160,16 @@ const char *readImeiString(int type)
 		fd = open("/dev/ttyUSB2", O_RDWR);
 	if ( fd < 0 )
 	{
-		printf("imei, open dev error\n");
-		return NULL;
+		LOG("imei, open dev error");
+		return imei;
 	}
 
 	rc = write(fd, queryStr[type], strlen(queryStr[type]));
 	if ( rc < 0 )
 	{
-		printf("imei, write query error\n");
+		LOG("imei, write query error");
 		close(fd);
-		return NULL;
+		return imei;
 	}
 
 	memset(bufptr, 0, sizeof(bufptr));
@@ -195,29 +192,31 @@ const char *readImeiString(int type)
 
 	if ( count <= 0 )
 	{
-		printf("imei, read dev error\n");
-		return NULL;
+		LOG("imei, read dev error");
+		return imei;
 	}
 
 // parse imei
 #ifdef CITOPS	//思拓
-	sscanf(bufptr, "%*[^0-9]%[0-9]", imei);
+	if(strstr(bufptr, "AT+CGSN") != NULL || strstr(bufptr, "AT+GSN") != NULL)
+		sscanf(bufptr, "%*[^0-9]%[0-9]", imei);
+#ifdef DEBUG
+	else
+		LOG("parse imei err, bufptr=%s", bufptr);
+#endif
 #else
 
 	rc = read_sub_string_trim(bufptr, subStr[type], "OK", imei, sizeof(imei));
 	if ( rc < 10 )
 	{
 		if(type == 0)
-		{
-			printf("%s, parse cgsn err, bufptr=%s\n", subStr[type], bufptr);
-		}
-		return NULL;
+			LOG("%s, parse cgsn err, bufptr=%s", subStr[type], bufptr);
 	}
 #endif
 
 #ifdef DEBUG
-	printf("+++: %s\n", bufptr);
-	printf("IMEI=%s\n", imei);
+	LOG("+++: %s", bufptr);
+	LOG("IMEI=%s", imei);
 #endif
 	return imei;
 	

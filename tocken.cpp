@@ -20,8 +20,6 @@
 #include "myaes.h"
 #include "md5.h"
 
-#define LOG(format,...) printf("["__DATE__" "__TIME__"] " format "\n",  ##__VA_ARGS__)
-
 #define RET_SUCCESS					0	// 鉴权成功
 #define RET_FAIL					-1  // 鉴权失败,license不一致
 #define	RET_FAIL_IMEI				2	// IMEI读取失败或者为空
@@ -68,8 +66,7 @@ struct  authenticateInfo
 #define PORT			9191
 
 #ifdef CITOPS	//思拓授权的路径
-	#define FILEPATH1		"/mnt/user/dsai"
-	//#define FILEPATH1		"/var/disk2/dsai"
+	#define FILEPATH1		"/mnt/user/dsai/"
 #else
 	#define FILEPATH1		"/mnt/nand/"
 	#define FILEPATH2		"/mnt/sd1/"
@@ -79,7 +76,7 @@ struct  authenticateInfo
 	#define FILENAME2		"desheng2.com"
 	#define SPECIAL_FILE	"/mnt/sd1/special_for_dsai_test.com"
 
-const char* DSIP[3] = {"auth.desheng-ai.com", "www.desheng-ai.com.cn", "183.3.136.80"};
+const char* DSIP[3] = {"www.desheng-ai.com.cn", "auth.desheng-ai.com", "183.3.136.80"};
 
 int socket_resolver(const char *domain, char* ipaddr, int len);
 
@@ -89,8 +86,10 @@ private:
     //当前线程的线程ID
     pthread_t tidSend;
     pthread_t tidRecv;
+    pthread_t tidGetIp;
     static void * thread_proxy_func_send(void * args);
     static void * thread_proxy_func_recv(void * args);
+    static void * thread_proxy_func_getIp(void * args);
 
 public:
 	Thread();
@@ -98,7 +97,9 @@ public:
 
 	virtual void runSend() = 0;
 	virtual void runRecv() = 0;
+	virtual void runGetIp() = 0;
 	void 	start();
+	void 	startGetIP();
 };
 
 class tocken : public Thread
@@ -147,6 +148,7 @@ public:
 
 	static bool	isRunning;
 	static long long checkCode;
+	static bool isGetIPing;
 
 private:
  	int		CreateTcpSocket();
@@ -157,6 +159,7 @@ private:
 	void 	Close();
 	void 	runSend();
 	void 	runRecv();
+	void 	runGetIp();
 	void 	saveTocken(char* buf);
 
 	int 	netdev_get_mac(const char *devname, OUT char *macstr, int macstr_len);
@@ -167,22 +170,6 @@ private:
 #include "get_imei.h"
 #include "tocken.h"
 
-
-/*
-ERROR #00001  ====> imei, open dev error
-*/
-
-static sigjmp_buf				jmpbuf;
-static volatile sig_atomic_t	canjump;
-static void tcl_sig_alrm(int signo)
-{
-    if (!canjump)
-    {
-        return;
-
-    }
-    siglongjmp(jmpbuf, 1);
-}
 
 int socket_resolver(const char *domain, char* ipaddr, int len)
 {
@@ -196,23 +183,7 @@ int socket_resolver(const char *domain, char* ipaddr, int len)
         hints.ai_flags = AI_CANONNAME;
         hints.ai_protocol = 0;  
 
-        if (signal(SIGALRM, tcl_sig_alrm) == SIG_ERR)
-        {
-            return -1;
-        }
-
-        if (sigsetjmp(jmpbuf, 1))
-        {
-            printf("DNS time out\n");		//	域名解析超时，退出阻塞
-            alarm(0);
-            return -1;
-        }
-
-        canjump = 1;
-        alarm(15);							//	设置定时器，DNS解析超过15秒，就退出
         ret = getaddrinfo(domain, NULL, &hints, &result);
-        canjump = 0;
-
         if (ret != 0)
         {
                 return -1;
@@ -237,6 +208,7 @@ int socket_resolver(const char *domain, char* ipaddr, int len)
 
 tocken* tocken::m_pTocken = NULL;
 bool	tocken::isRunning = false;
+bool	tocken::isGetIPing = false;
 long long tocken::checkCode = -1;
 static pthread_mutex_t m_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t m_lockSec = PTHREAD_MUTEX_INITIALIZER;
@@ -249,7 +221,7 @@ int authentication(std::string key, std::string algVersion, std::string imeiDevP
 	if(imeiDevPath.length() != 0)
 		setImeiDevPath(imeiDevPath.c_str());
 #ifdef DEBUG
-	std::cout << "Key: " << key << std::endl;
+	LOG("Key: %s", key.c_str());
 	//检查是否存在测试KEY，存在则使用测试KEY测试
 	pthread_mutex_lock(&m_lock);
     FILE *fp = NULL;
@@ -302,14 +274,20 @@ int authentication(std::string key, std::string algVersion, std::string imeiDevP
 #endif
 	else
 	{
-		printf("Warning #00001!\n");		//Open file %s failed
+		LOG("Failed result : %d.", RET_FAILE_OPEN_ERROR);
 		return RET_FAILE_OPEN_ERROR;
 	}
 
 	tocken* pTock = tocken::GetInstance(info);
+	if(!tocken::isGetIPing)
+		pTock->startGetIP();				//启动线程解析域名获取IP地址
+
 	int r = pTock->getToken();
-	if( r != 0)
+	if(r != 0)
+	{
+		LOG("Failed result : %d.", r);
 		return r;							//返回license获取失败原因
+	}
 
 	if(tocken::checkCode < 0)				//checkCode小于零，程序启动，更改校验位。
 		pTock->setCheckCode(1);
@@ -318,6 +296,8 @@ int authentication(std::string key, std::string algVersion, std::string imeiDevP
 		pTock->start();						//启动线程
 
 	int result =  pTock->authenticate(KEY, algVersion);
+	if(result != 0)
+		LOG("Failed result : %d.", result);
 	return result;							//返回鉴权结果
 }
 
@@ -335,6 +315,11 @@ void Thread::start()
 	pthread_create(&tidSend, NULL, thread_proxy_func_send, this) == 0 ? true : false;
 }
 
+void Thread::startGetIP()
+{
+    	pthread_create(&tidGetIp, NULL, thread_proxy_func_getIp, this);
+}
+
 void * Thread::thread_proxy_func_send(void * args)
 {
  		Thread * pThread = static_cast<Thread *>(args);
@@ -349,12 +334,20 @@ void * Thread::thread_proxy_func_recv(void * args)
  		return NULL;
 }
 
+void * Thread::thread_proxy_func_getIp(void * args)
+{
+		Thread * pThread = static_cast<Thread *>(args);
+		pThread->runGetIp();
+		return NULL;
+}
+
 tocken::tocken(){}
 tocken::~tocken()
 {
 	Close();
 	tocken::m_pTocken = NULL;
 	tocken::isRunning = false;
+	tocken::isGetIPing = false;
 }
 
 struct tocken::head
@@ -572,7 +565,7 @@ int tocken::authenticate(std::string key, std::string algVersion)
 				buff[len - 1] = '\0';
 				if(strcmp(buff, result) == 0)
 				{
-					printf("Authenticate success!\n");
+					LOG("Authenticate success!");
 					pthread_mutex_unlock(&m_lock);
 					return RET_SUCCESS;
 				}
@@ -582,7 +575,6 @@ int tocken::authenticate(std::string key, std::string algVersion)
 		n++;
 	}
 
-	printf("Authenticate failed!\n");
 	pthread_mutex_unlock(&m_lock);
 
 	return RET_FAIL;
@@ -599,7 +591,6 @@ int tocken::getToken()
 	char tempIMEI[256] = {0};
 	strcpy(tempIMEI, get_imei(0));
 	if (strlen(tempIMEI) == 0) {
-		printf("ERROR #00000");
 		return RET_FAIL_IMEI;
 	}
 
@@ -609,7 +600,7 @@ int tocken::getToken()
 	// get CIMI
 #ifdef CIMI
 	if (get_imei(1) == NULL) {
-		printf("ERROR #00001");
+		LOG("ERROR #00001");
 		return RET_FAIL_IMEI;
 	}
 	m_CIMI = get_imei(1);
@@ -667,7 +658,7 @@ int tocken::getToken()
     	}
 		else
 		{
-			std::cout << "No license!" << std::endl;
+			LOG("No license!");
 		}
     	fclose(fp);
     }
@@ -675,16 +666,14 @@ int tocken::getToken()
     if(!isRegister)										//	鉴权文件已存在
     	return 0;
 
-    // 首次鉴权，重复连接服务器，直至成功连接，获取和保存鉴权码。
-	char ip[32] = {0};
-	int l = sizeof(DSIP) / sizeof(char*);
-	m_info.ip = DSIP[l - 1];
-	for(int i = 0; i < l - 1; i++)
+	int tSec;
+	for(tSec = 0; m_info.ip.length() == 0 && tSec < 30; tSec++)
 	{
-		if(socket_resolver(DSIP[i], ip, sizeof(ip)) == 0)
+		usleep(1000000);
+		if(tSec >= 30 - 1)
 		{
-			m_info.ip = ip;
-			break;
+			int l = sizeof(DSIP) / sizeof(char*);
+			m_info.ip = DSIP[l - 1];
 		}
 	}
 
@@ -712,7 +701,7 @@ int tocken::getToken()
 					result = atoi(flag);
 					if(result == 0 || result == 1)
 					{
-						printf("Register success!\n");
+						LOG("Register success!");
 						saveTocken(tocken);
 						isRegister = false;
 
@@ -724,7 +713,7 @@ int tocken::getToken()
 					}
 					else
 					{
-						printf("Register failed, error number: %d. \n", result);
+						LOG("Register failed, error number: %d.", result);
 						break;
 
 					}
@@ -913,7 +902,6 @@ int tocken::CreateTcpSocket()
 	tv_timeout.tv_sec = 10;
 	tv_timeout.tv_usec = 0;
 	setsockopt(m_nSockFd, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv_timeout, sizeof(struct timeval));
-
 	m_serverAddr.sin_family = AF_INET;
 	m_serverAddr.sin_port = htons(PORT);
 	inet_pton(AF_INET, m_info.ip.c_str(), &m_serverAddr.sin_addr.s_addr);
@@ -964,17 +952,40 @@ bool tocken::ReConnect(int n)
 	{
 		Close();
 		CreateTcpSocket();
+
 		if(Connect())
 			return true;
 
+
 		i++;
 		if(n == 0)
-			printf("Connecting Service!!!\n");
+		{
+			LOG("Connecting Service!!!");
+		}
+
 		usleep(1000000);
 	}
 
 	Close();
 	return false;
+}
+
+void tocken::runGetIp()
+{
+	tocken::isGetIPing = true;
+	char ip[32] = {0};
+	int l = sizeof(DSIP) / sizeof(char*);
+	for(int i = 0; i < l - 1; i++)
+	{
+		if(socket_resolver(DSIP[i], ip, sizeof(ip)) == 0)
+		{
+			m_info.ip = ip;
+			tocken::isGetIPing = false;
+			return;
+		}
+	}
+	m_info.ip = DSIP[l - 1];
+	tocken::isGetIPing = false;
 }
 
 void tocken::runSend()
@@ -1036,7 +1047,7 @@ void tocken::runSend()
 		{
 			Send(msg.c_str(), strlen(buf));
 #ifdef DEBUG
-			LOG("Send: %s\n", buf);
+			LOG("Send: %s", buf);
 #endif
 		}
 
@@ -1056,15 +1067,14 @@ void tocken::runRecv()
 	tocken::isRunning = true;
 	char buf[MAXLINE];
 
-	char ip[32] = {0};
-	int l = sizeof(DSIP) / sizeof(char*);
-	m_info.ip = DSIP[l - 1];
-	for(int i = 0; i < l - 1; i++)
+	int tSec;
+	for(tSec = 0; m_info.ip.length() == 0 && tSec < 30; tSec++)
 	{
-		if(socket_resolver(DSIP[i], ip, sizeof(ip)) == 0)
+		usleep(1000000);
+		if(tSec >= 30)
 		{
-			m_info.ip = ip;
-			break;
+			int l = sizeof(DSIP) / sizeof(char*);
+			m_info.ip = DSIP[l - 1];
 		}
 	}
 
@@ -1097,7 +1107,7 @@ void tocken::runRecv()
 			head._getdata(recvMsg.c_str(), rest);
 
 #ifdef DEBUG
-			LOG("Recv MSGID: %#X, %s\n", head.MSGID, rest);
+			LOG("Recv MSGID: %#X, %s", head.MSGID, rest);
 #endif
 
 			if(head.MSGID == _tocken_srv_resp)	//通用应答
@@ -1189,7 +1199,7 @@ int tocken::netdev_get_mac(const char *devname, OUT char *macstr, int macstr_len
 	}
 	else
 	{
-		printf("get mac error, %d, %s\n", errno, strerror(errno));
+		LOG("get mac error, %d, %s", errno, strerror(errno));
 	}
 
 
